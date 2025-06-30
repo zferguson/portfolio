@@ -1,0 +1,216 @@
+---
+title: "ISYE 6501 - HW08"
+output: 
+  pdf_document:
+    latex_engine: xelatex
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r set-wd, echo = FALSE, message = FALSE, warning = FALSE, results = 'hide'}
+# Clear environment, set working directory
+rm(list = ls())
+setwd('/Users/zachferguson/Documents/Grad School/ISYE 6501/Homework/HW08/')
+
+# Load necessary packagßes
+library(dplyr)
+library(tidyr)
+library(knitr)
+library(caret)
+library(glmnet)
+library(pROC)
+library(reshape2)
+library(ggplot2)
+library(ggfortify)
+```
+
+# Question 11.1
+  
+Using the crime data set uscrime.txt from Questions 8.2, 9.1, and 10.1, build a regression model using:
+
+1. Stepwise regression
+
+2. Lasso
+
+3. Elastic Net
+
+For Parts 2 and 3, remember to scale the data first – otherwise, the regression coefficients will be on different scales and the constraint won’t have the desired effect. For Parts 2 and 3, also use the glmnet function in R.
+
+Notes on R:
+
+• For the elastic net model, what we called lambda in the videos, glmnet calls “alpha”; you can get a range of results by varying alpha from 1 (lasso) to 0 (ridge regression) [and, of course, other values of alpha in between].
+
+• In a function call like glmnet(x,y,family=”mgaussian”,alpha=1) the predictors x need to be in R’s matrix format, rather than data frame format.  You can convert a data frame to a matrix using as.matrix – for example, x <- as.matrix(data[,1:n-1])   Rather than specifying a value of T, glmnet returns models for a variety of values of T.
+
+## Data Preparation, Splits, and Scaling
+
+First, let's load the data, create our test/validation splits, and scale our data.
+```{r crime-data, fig.align = 'center', warning = FALSE}
+set.seed(35)
+
+# Read the data and split into training (70%) and validation
+
+crime <- read.table(file = 'uscrime.txt', stringsAsFactors = FALSE, header = TRUE)
+
+train.index <- sample(1:nrow(crime), as.integer(0.70 * nrow(crime), replace = FALSE))
+train.df <- crime[ train.index,]
+valid.df <- crime[-train.index,]
+
+# Scaling the data and creating scaled versions of the training and validation datasets
+
+scale.df <- data.frame(scale(crime, center = TRUE, scale = TRUE))
+train.scale <- data.frame(scale(train.df, center = TRUE, scale = TRUE))
+train.x <- as.matrix(train.scale[,-16])
+train.y <- as.matrix(train.scale[, 16])
+
+valid.scale <- data.frame(scale(valid.df, center = TRUE, scale = TRUE))
+valid.x <- as.matrix(valid.scale[,-16])
+valid.y <- as.matrix(valid.scale[, 16])
+
+# Some functions for later use
+
+show <- function(df) {
+  require(knitr)
+  return(kable(df, booktabs = TRUE, 'simple'))
+}
+
+get.rsq <- function(predicted, actual) {
+  sse = sum((predicted - actual) ^2)
+  tss = sum((actual - mean(actual)) ^2)
+  return(round(1 - (sse / tss), 6))
+}
+```
+
+## Stepwise Regression
+
+Now that we have our training and validation datasets, we can build our Stepwise Regression model.
+```{r step-regression, fig.align = 'center', warning = FALSE}
+model.base <- lm(Crime ~ 1, data = train.df)
+model.all  <- lm(Crime ~ ., data = train.df)
+
+scope.step <- list(lower = model.base, upper = model.all)
+model.step <- step(model.base, scope = scope.step, direction = "both",
+                   trace = 0, steps = 1000)
+
+show(coef(model.step))
+
+fm.step <- Crime ~ Po1 + Ineq + Ed + Prob
+lm.step <- lm(fm.step, data = train.df)
+
+summary(lm.step)
+
+rsq.step.train <- get.rsq(predict(lm.step, train.df), train.df$Crime)
+rsq.step.valid <- get.rsq(predict(lm.step, valid.df), valid.df$Crime)
+
+show(rsq.step.valid)
+
+step.summary <- c(
+  'Stepwise',
+  length(lm.step$coefficients)-1,
+  rsq.step.train,
+  rsq.step.valid
+  )
+```
+
+### Observations
+The Stepwise Regression model identified 4 variables that are most important (Po1, Ineq, Ed, and Prob), with an adjusted R-Squared value of 0.6984 on our initial fitted model. However our R-Squared when predicting the output against the validation data set was much lower at 0.5992. This suggests our training model was either overfit to its own random effects, or we may need more data points.
+
+## Lasso Regression
+
+Now we will build a Lasso Regression model using the scaled versions of the training and validation data sets.
+```{r lasso-regression, fig.align = 'center', warning = FALSE}
+cv.lasso <- cv.glmnet(train.x, train.y, family = 'gaussian', 
+                      alpha = 1, standardize = TRUE, nfolds = 10)
+autoplot(cv.lasso)
+print(cv.lasso)
+
+lambda.lasso <- cv.lasso$lambda.min
+show(lambda.lasso)
+
+crime.lasso <- glmnet(train.x, train.y, family = 'gaussian', 
+                      alpha = 1, lambda = lambda.lasso)
+
+coef(crime.lasso)
+
+fm.lasso <- Crime ~ M + So + Ed + Po1 + M.F + Pop + U2 + Ineq + Prob + Time
+lm.lasso <- lm(fm.lasso, data = train.scale)
+
+summary(lm.lasso)
+
+rsq.lasso.train <- get.rsq(predict(lm.lasso, data.frame(train.x)), train.y)
+rsq.lasso.valid <- get.rsq(predict(lm.lasso, data.frame(valid.x)), valid.y)
+
+show(rsq.lasso.valid)
+
+lasso.summary <- c(
+  'Lasso',
+  length(lm.lasso$coefficients)-1,
+  rsq.lasso.train,
+  rsq.lasso.valid
+  )
+```
+
+### Observations
+Our Lasso Regression model identified a lot more valuable coefficients (10 in total), with an adjusted R-Squared of 0.6907 on the training fit (not as good as our Stepwise model). When running our model against the scaled validation data set, however, our R-Squared was much better at 0.6759.
+
+## Elastic Net Regression
+
+Finally, we will build our Elastic Net Regression and then we can compare all 3 against each other.
+```{r elastic-net, fig.align = 'center', warning = FALSE}
+elastic.results <- data.frame(matrix(ncol = 4, nrow = 0))
+colnames(elastic.results) <- c('Alpha','Lambda','MSE','R-Squared')
+
+for (i in 1:20) {
+  alpha.val = i / 20
+  en = cv.glmnet(train.x, train.y, family = 'gaussian', 
+                          standardize = TRUE, alpha = alpha.val)
+  lambda.val = en$lambda.min
+  mse.val = en$cvm[en$lambda == en$lambda.min]
+  rsq.val = en$glmnet.fit$dev.ratio[which(en$glmnet.fit$lambda == en$lambda.min)]
+  
+  elastic.results[nrow(elastic.results)+1,] <- c(alpha.val, lambda.val, mse.val, rsq.val)
+}
+
+show(elastic.results)
+
+elastic.net <- cv.glmnet(train.x, train.y, alpha = 0.80, nfolds = 5, 
+                         type.measure = 'mse', family = 'gaussian')
+coef(elastic.net, s = elastic.net$lambda.min)
+
+fm.elastic <- Crime ~ M + So + Ed + Po1 + Po2 + M.F + Pop + U2 + Ineq + Prob + Time
+lm.elastic <- lm(fm.elastic, data = train.scale)
+
+summary(lm.elastic)
+
+rsq.elastic.train <- get.rsq(predict(lm.elastic, data.frame(train.x)), train.y)
+rsq.elastic.valid <- get.rsq(predict(lm.elastic, data.frame(valid.x)), valid.y)
+
+show(rsq.elastic.valid)
+
+elastic.summary <- c(
+  'Elastic Net',
+  length(lm.elastic$coefficients)-1,
+  rsq.elastic.train,
+  rsq.elastic.valid
+  )
+```
+
+### Observations
+The Elastic Net approach gives us our best adjusted R-Squared on the training data set out of all 3 (0.6764), and the best R-Squared on the validation data set as well (0.6909). Based on these 3 models, it looks like the Elastic Net approach would be the best option for us.
+
+## Summary
+```{r summary, fig.align = 'center', warning = FALSE}
+summary.df <- data.frame(matrix(ncol = 4, nrow = 0))
+colnames(summary.df) <- c('Model','Parameters','Training R-Squared','Validation R-Squared')
+
+summary.df[1,] <- step.summary
+summary.df[2,] <- lasso.summary
+summary.df[3,] <- elastic.summary
+
+show(summary.df)
+```
+
+### Observations
+As we saw, the Elastic Net model was the best option when comparing R-Squared and adjusted R-Squared. It does require one additional variable over the Lasso approach, and seven more when compared to the Stepwise Regression model. If there were issues or exhorbitant costs associated with collecting the data for that particular variable, we could use the Lasso regression model with seemingly minimal loss of value.

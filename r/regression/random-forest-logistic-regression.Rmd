@@ -1,0 +1,271 @@
+---
+title: "ISYE 6501 - HW07"
+output:
+  pdf_document:
+    latex_engine: xelatex
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r set-wd, echo = FALSE, message = FALSE, warning = FALSE, results = 'hide'}
+# Clear environment, set working directory
+rm(list = ls())
+setwd('/Users/zachferguson/Documents/Grad School/ISYE 6501/Homework/HW07/')
+
+# Load necessary packages
+library(dplyr)
+library(tidyr)
+library(knitr)
+library(psych)
+library(caret)
+library(rpart)
+library(rpart.plot)
+library(tree)
+library(randomForest)
+library(InformationValue)
+library(pROC)
+library(ggbiplot)
+library(reshape2)
+library(matrixStats)
+library(ggplot2)
+library(ggthemes)
+library(ggfortify)
+library(ggcorrplot)
+```
+
+# Question 10.1
+  
+Using the same crime data set *uscrime.txt* as in Questions 8.2 and 9.1, find the best model you can using a regression tree model, and a random forest model.
+
+In R, you can use the tree package or the rpart package, and the randomForest package. For each model, describe one or two qualitative takeaways you get from analyzing the results (i.e., don’t just stop when you have a good model, but interpret it too).
+
+```{r crime_data, fig.align = 'center', warning = FALSE}
+crime <- read.table(file = 'uscrime.txt', stringsAsFactors = FALSE, header = TRUE)
+set.seed(35)
+
+crime.tree <- rpart(Crime ~ ., data = crime, method = 'anova')
+rpart.plot(crime.tree)
+par(mfrow = c(1,2))
+rsq.rpart(crime.tree)
+
+var.imp <- as.matrix(crime.tree$variable.importance)
+kable(var.imp, booktabs = TRUE, 'simple')
+
+cpx.prm <- data.frame(crime.tree$cptable)
+kable(cpx.prm, booktabs = TRUE, 'simple')
+```
+
+Based on the complexity parameter table, it looks like 1 split gives us the lowest amount of relative error.
+
+``` {r regression2, fig.align = 'center', warning = FALSE}
+min.cp <- cpx.prm[which.min(cpx.prm[,'xerror']),'CP']
+prune.tree <- prune(crime.tree, cp = min.cp)
+
+rpart.plot(prune.tree)
+
+rg.pred <- predict(prune.tree, crime[,1:15])
+
+get.rsq <- function(pred, actual) {
+  rss = sum((pred - actual)^2)
+  tss = sum((actual - mean(actual))^2)
+  return(1 - (rss / tss))
+}
+
+kable(get.rsq(rg.pred, crime$Crime), booktabs = TRUE, 'simple')
+
+crime.under.7.7 <- filter(crime, Po1 < 7.7)
+lm.under <- lm(Crime ~., data = crime.under.7.7)
+summary(lm.under)
+
+crime.over.7.7 <- filter(crime, Po1 >= 7.7)
+lm.over <- lm(Crime ~., data = crime.over.7.7)
+summary(lm.over)
+```
+
+#### Observations
+
+1. 3 predictors were selected from the original decision tree (Po1, Pop, and NW), with 2 branching points and a total of 4 terminal nodes. Based on the results of the decision tree, we should prune this tree to only one split based on Po1 (one branch >= 7.7, the other < 7.7).
+
+2. When we prune the tree on Po1, each branch has decent adjusted R-squared values, but borderline poor p-values, indicating that the individual regression models explain a lot of the variance in the results, but it's not certain to be statistically significant, making it not very valuable.
+
+```{r random_forest, fig.align = 'center', warning = FALSE} 
+crime.rf <- randomForest(Crime ~ ., data = crime, keep.forest = TRUE, importance = TRUE)
+
+print(crime.rf)
+varImpPlot(crime.rf)
+
+kable(get.rsq(crime.rf$predicted, crime$Crime), booktabs = TRUE, 'simple')
+
+rf.results <- function(df) {
+  control = trainControl(method = 'repeatedcv', number = 10, repeats = 3)
+  rf.train = train(Crime~., data = df, method = 'rf', trControl = control)
+  print(rf.train)
+}
+
+rf.results(crime)
+```
+
+#### Observations
+
+1. The most important variables based on random forest are Po1 and Po2 (same as regression tree), with a sharp dropoff after that. I think it's really interesting how the different approaches (linear regression vs regression trees/random forest) identified different variables as important. The R-squared value did increase slightly when using random forest (0.412) vs regression tree (0.412).
+
+2. The best value of mtry is 2, which gives us an RMSE of 276.4354.
+
+# Question 10.2
+
+#### Question
+Describe a situation or problem from your job, everyday life, current events, etc., for which a logistic regression model would be appropriate. List some (up to 5) predictors that you might use.
+
+#### Answer
+In my work, a logistic regression model would be really useful when determining the probability that an applicant for insurance will become a paying customer for the company. Some of the predictors I would use are the geographic location of the prospect (by state), their gender, their age when they applied, any health conditions they list on their application, and whether or not they've applied for insurance with us before.
+
+# Question 10.3
+  
+1. Using the GermanCredit data set germancredit.txt from http://archive.ics.uci.edu/ml/machine-learning-databases/statlog/german / (description at http://archive.ics.uci.edu/ml/datasets/Statlog+%28German+Credit+Data%29 ), use logistic regression to find a good predictive model for whether credit applicants are good credit risks or not.  Show your model (factors used and their coefficients), the software output, and the quality of fit.  You can use the glm function in R. To get a logistic regression (logit) model on data where the response is either zero or one, use family=binomial(link=”logit”) in your glm function call.  
+  
+2. Because the model gives a result between 0 and 1, it requires setting a threshold probability to separate between “good” and “bad” answers. In this data set, they estimate that incorrectly identifying a bad customer as good, is 5 times worse than incorrectly classifying a good customer as bad. Determine a good threshold probability based on your model.  
+
+```{r german-credit, fig.align = 'center', warning = FALSE}
+credit <- read.table('german.txt', sep = ' ')
+set.seed(65)
+```
+
+We can rename the columns so the dataset makes a little more sense. Our response is also currently 1 or 2, but we can make this a binomial just by subtracting 1 from every observation.
+
+``` {r clean-data, fig.align = 'center', warning = FALSE}
+colnames(credit) <- c(
+  'acctStatus','monthDuration','creditHistory','purpose','creditAmount',
+  'savingsAccount','employedSince','installmentRate','statusSex','otherDebtors',
+  'residentSince','property','ageYears','otherInstallments','housing',
+  'existingCredits','job','dependents','telephone','isForeign','response'
+)
+
+credit$response <- credit$response - 1
+```
+
+Now we can randomly split our data into training (70%) and test (30%) partitions, then begin creating our logistic regression models. Our first one will include all variables and their permutations, then we will trim down to only the most significant items.
+
+``` {r sample-data, fig.align = 'center', warning = FALSE}
+credit.sample <- createDataPartition(credit$response, p = .70, list = FALSE, times = 1)
+
+credit.train <- credit[credit.sample,]
+credit.test <- credit[-credit.sample,]
+
+train.glm.1 <- glm(response ~ ., data = credit.train, family = binomial(link="logit"))
+anova(train.glm.1, test = 'Chi')
+```
+
+Based on anova, the most significant attributes are acctStatus, monthDuration, creditHistory, and installmentRate. We can then look deeper into those to see if any individual datapoints stick out.
+
+``` {r iteration-2, fig.align = 'center', warning = FALSE}
+train.glm.2 <- glm(response ~ acctStatus + monthDuration + creditHistory +
+                     purpose + installmentRate, data = credit.train, 
+                   family = binomial(link="logit"))
+summary(train.glm.2)
+```
+
+Based on our second regression attempt (AIC of 692.34), it looks like subsets of our significant attributes are more significant than others, so we will split those attributes out into their own columns and retrain the model one more time.
+
+``` {r iteration-3, fig.align = 'center', warning = FALSE}
+credit.train$acctStatusA14[credit.train$acctStatus == 'A14'] <- 1
+credit.train$acctStatusA14[credit.train$acctStatus != 'A14'] <- 0
+credit.train$creditHistoryA34[credit.train$creditHistory == 'A34'] <- 1
+credit.train$creditHistoryA34[credit.train$creditHistory != 'A34'] <- 0
+credit.train$purposeA41[credit.train$purpose == 'A41'] <- 1
+credit.train$purposeA41[credit.train$purpose != 'A41'] <- 0
+credit.train$purposeA42[credit.train$purpose == 'A42'] <- 1
+credit.train$purposeA42[credit.train$purpose != 'A42'] <- 0
+credit.train$purposeA43[credit.train$purpose == 'A43'] <- 1
+credit.train$purposeA43[credit.train$purpose != 'A43'] <- 0
+credit.train$purposeA49[credit.train$purpose == 'A49'] <- 1
+credit.train$purposeA49[credit.train$purpose != 'A49'] <- 0
+
+train.glm.3 <- glm(response ~ acctStatusA14 + monthDuration + creditHistoryA34 + 
+                     purposeA41 + purposeA42 + purposeA43 + purposeA49 + installmentRate, 
+                   data = credit.train, family = binomial(link="logit"))
+
+summary(train.glm.3)
+```
+
+Our last iteration with just the significant characteristics of our best attributes increased our AIC to 701.4. We can now apply those same transformations to our test dataset and create our confusion matrix.
+
+``` {r confusion-matrix, fig.align = 'center', warning = FALSE}
+credit.test$acctStatusA14[credit.test$acctStatus == 'A14'] <- 1
+credit.test$acctStatusA14[credit.test$acctStatus != 'A14'] <- 0
+credit.test$creditHistoryA34[credit.test$creditHistory == 'A34'] <- 1
+credit.test$creditHistoryA34[credit.test$creditHistory != 'A34'] <- 0
+credit.test$purposeA41[credit.test$purpose == 'A41'] <- 1
+credit.test$purposeA41[credit.test$purpose != 'A41'] <- 0
+credit.test$purposeA42[credit.test$purpose == 'A42'] <- 1
+credit.test$purposeA42[credit.test$purpose != 'A42'] <- 0
+credit.test$purposeA43[credit.test$purpose == 'A43'] <- 1
+credit.test$purposeA43[credit.test$purpose != 'A43'] <- 0
+credit.test$purposeA49[credit.test$purpose == 'A49'] <- 1
+credit.test$purposeA49[credit.test$purpose != 'A49'] <- 0
+
+# Baseline prediction and confusion matrix
+pred.glm <- predict(train.glm.3, credit.test[,-21], type = 'response')
+cutoff <- optimalCutoff(credit.test$response, pred.glm)[1]
+pred.cutoff <- as.integer(pred.glm > cutoff)
+results <- table(pred.cutoff,credit.test$response)
+
+kable(results, booktabs = TRUE, 'simple')
+
+tn.1 <- results[1,1]
+fn.1 <- results[2,1]
+fp.1 <- results[1,2]
+tp.1 <- results[2,2]
+
+accuracy <- (tn.1 + tp.1) / sum(results)
+sensitivity <- tp.1 / (tp.1 + fn.1)
+specificity <- tn.1 / (tn.1 + fn.1)
+
+accuracy
+sensitivity
+specificity
+
+pred.roc <- roc(credit.test$response, pred.cutoff)
+pred.auc <- round(auc(credit.test$response, pred.cutoff)[1],4)
+
+ggroc(pred.roc, colour = '#8BBBE4', size = 1) +
+  ggtitle(paste0('ROC Curve ', '(AUC = ', pred.auc, ')'))
+
+cost.calc <- function(pred.df, act.df) {
+  cost.df = data.frame(matrix(ncol = 2, nrow = 0))
+  colnames(cost.df) = c('threshold','misclass.cost')
+
+  for (i in 2:100) {
+    threshold = i / 100
+    pred.round = as.integer(pred.df > threshold)
+    cost.table = table(act.df$response,pred.round)
+
+    fn = if(ncol(cost.table)==2) {cost.table[1,2]} else {0}
+    fp = if(nrow(cost.table)==2) {cost.table[2,1]} else {0}
+
+    cost = (fn * 1) + (fp * 5)
+    cost.df[nrow(cost.df) + 1, ] <- c(threshold, cost)
+  }
+  return(na.omit(cost.df))
+}
+
+threshold.cost <- cost.calc(pred.glm, credit.test)
+min.threshold <- which.min(threshold.cost$misclass.cost) / 100
+
+ggplot(threshold.cost, aes(x = threshold, y = misclass.cost)) +
+  geom_line(colour = '#8BBBE4') +
+  geom_vline(xintercept = min.threshold, linetype = 'dotted') +
+  ggtitle('Threshold vs. Cost') +
+  xlab('Threshold') +
+  ylab('Total Cost of Misclassifications')
+
+kable(train.glm.3$coefficients, booktabs = TRUE, 'simple')
+```
+
+#### Observations
+1. I ran 3 different logistic regression iterations, the first with all variables and their permutations, the second with only the most significant variables and all their permutations, and the last with only the most significant permutations of the most significant variables.
+
+2. Since the cost of false positives is 5 times that of false negatives, simply measuring accuracy of our results wasn't enough. We ran a loop for every threshold from 1% through 100%, and the optimal threshold that minimized cost was 17% (cost of 162).
+
+3. Our AUC for this analysis ended up at 0.6706, meaning that our model would correctly classifiy a random positive datapoint 67.06% of the time.

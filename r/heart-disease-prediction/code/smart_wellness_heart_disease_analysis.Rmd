@@ -1,0 +1,454 @@
+---
+title: "Smart Wellness: Using Fitness Trackers for Early Detection of Heart Disease"
+output: html_notebook
+---
+
+Import modules
+
+```{r echo = F, results = 'hide'}
+library(car)
+library(dplyr)
+library(tidyr)
+library(caret)
+library(rpart)
+library(rpart.plot)
+library(e1071)
+library(randomForest)
+library(ggplot2)
+library(caTools)
+library(class)
+library(corrplot)
+library(fastDummies)
+library(Hmisc)
+library(reshape)
+library(plotly)
+library(DataExplorer)
+
+set.seed(42)
+```
+
+Import data
+
+```{r}
+# getwd() # optional code for checking working directory
+# setwd('/path/to/repo') # optional code for confirming working directory is set to main project repository, adjust string per applicable path
+data <- read.csv('..\\Data\\heart.csv', header = TRUE)
+```
+
+# Exploratory Data Analysis
+
+Read Dataset
+
+```{r}
+heart1 <- data
+head(heart1)
+tail(heart1)
+```
+
+Data prep for exploration
+
+```{r}
+df_cor <- heart1 %>% mutate_if(is.character, as.factor)
+df_cor <- df_cor %>% mutate_if(is.factor, as.numeric)
+```
+
+Initial Data Exploration 
+reference https://www.r-bloggers.com/2021/03/faster-data-exploration-with-dataexplorer/
+
+```{r}
+create_report(df_cor)
+```
+
+Create Univariate Distribution Histograms
+
+```{r}
+plot_histogram(df_cor, title="Univariate Distribution Histograms")
+```
+
+Create QQ Plots
+
+```{r}
+df_cor%>%
+  gather()%>%
+  ggplot(., aes(sample = value)) +
+  stat_qq()+ stat_qq_line() +
+  facet_wrap(vars(key), scales ='free_y') + ggtitle("QQ Plots")
+```
+
+Build Correlation Matrix 
+
+```{r}
+corr <- cor(df_cor[sapply(df_cor,is.numeric)], method = c("spearman")) 
+corrplot(corr)
+```
+
+Correlation Matrix with high significance 
+
+```{r}
+corr_sig <- function(data=df_cor,sig=0.5){
+corr <- cor(df_cor[sapply(df_cor,is.numeric)]) 
+#prepare to drop duplicates and correlations of 1     
+corr[lower.tri(corr,diag=TRUE)] <- NA 
+#drop perfect correlations
+corr[corr == 1] <- NA 
+#turn into a 3-column table
+corr <- as.data.frame(as.table(corr))
+#remove the NA values from above 
+corr <- na.omit(corr) 
+#select significant values  
+corr <- subset(corr, abs(Freq) > sig) 
+#sort by highest correlation
+corr <- corr[order(-abs(corr$Freq)),] 
+#print table
+print(corr)
+#turn corr back into matrix in order to plot with corrplot
+mtx_corr <- reshape2::acast(corr, Var1~Var2, value.var="Freq")
+#plot correlations visually
+corrplot(mtx_corr, is.corr=FALSE, tl.col="black", na.label=" ")
+}
+corr_sig()
+```
+
+# Data Cleaning & Preparation
+
+```{r}
+# remove any rows with missing values
+data <- na.omit(data)
+
+# encode ST_Slope (Down = 1, Flat = 2, Up = 3)
+data$ST_Slope <- factor(data$ST_Slope, levels = c("Down", "Flat", "Up"))
+data$ST_Slope <- as.integer(data$ST_Slope)
+
+# Change all other character columns to factors, then convert to dummy columns
+char_cols <- which(sapply(data, is.character))  # Identify character columns
+data[char_cols] <- lapply(data[char_cols], factor)  # Convert to factors
+cat_vars <- names(data)[sapply(data, is.factor)] # Get list of factor columns
+
+data <- dummy_cols(data, remove_first_dummy = TRUE, remove_selected_columns = TRUE)
+
+# identify columns with continuous values and scale them
+scale_cols <- c('Age','RestingBP','Cholesterol','MaxHR','Oldpeak','ST_Slope')
+for (col_name in scale_cols) {
+    data[[col_name]] <- scale(data[[col_name]])
+}
+
+# check data for multicollinearity
+fit.all <- lm(HeartDisease ~ ., data = data)
+vif <- vif(fit.all)
+vif_df <- data.frame(Variable = names(vif), VIF = as.numeric(vif))
+vif_df <- vif_df[order(-vif_df$VIF), ]
+
+# show VIF values for each variable
+vif_df
+
+# check data for possible interaction terms
+check_interactions <- lm(HeartDisease ~ .^2, data=data)
+summary(check_interactions)
+
+# add interaction term results with significance of p < 0.001 to a copy of the working dataframe
+int_terms_data <- data.frame(data)
+int_terms_data$ST_Slope_RestingECG_Normal <- int_terms_data$ST_Slope * int_terms_data$RestingECG_Normal
+int_terms_data$ChestPainType_NAP_RestingECG_ST <- int_terms_data$ChestPainType_NAP * int_terms_data$RestingECG_ST
+int_terms_data$ChestPainType_TA_RestingECG_Normal <- int_terms_data$ChestPainType_TA * int_terms_data$RestingECG_Normal
+
+# Train/test split
+split <- sample.split(data$HeartDisease, SplitRatio = 0.6)
+
+# Create the training set based on the logical vector
+data_train <- subset(data, split == TRUE)
+temp_data <- subset(data, split == FALSE)
+
+# Now we split the temporary set into test and validation sets (50%/50%)
+# This results in a 60/20/20 split for the entire dataset
+split_temp <- sample.split(temp_data$HeartDisease, SplitRatio = 0.5)
+data_test <- subset(temp_data, split_temp == TRUE)
+data_valid <- subset(temp_data, split_temp == FALSE)
+
+data_train
+
+# Other train/test split for the data that includes interaction terms
+split2 <- sample.split(int_terms_data$HeartDisease, SplitRatio = 0.6)
+
+# Create the training sets based on the logical vector
+data_train2 <- subset(int_terms_data, split == TRUE)
+temp_data2 <- subset(int_terms_data, split == FALSE)
+
+# Split the temporary set into test and validation sets (50%/50%)
+split_temp2 <- sample.split(temp_data2$HeartDisease, SplitRatio = 0.5)
+data_test2 <- subset(temp_data2, split_temp == TRUE)
+data_valid2 <- subset(temp_data2, split_temp == FALSE)
+```
+
+# Model Building
+
+Decision Tree:
+
+```{r}
+# Fit Model
+model_dt <- rpart(as.factor(HeartDisease) ~., data = data_train, method = "class")
+
+# Plot Decision Tree
+rpart.plot(model_dt)
+
+# Predict on validation set
+preds_dt <- predict(model_dt, data_valid, type = "class") 
+
+# Model evaluation
+conf_matrix_dt <- confusionMatrix(preds_dt, as.factor(data_valid$HeartDisease))
+print(conf_matrix_dt)
+```
+
+Random Forest:
+
+```{r}
+# Fit model
+model_rf <- randomForest(as.factor(HeartDisease) ~., data = data_train, mtry = 2, ntree = 500, importance = TRUE)
+
+# Predict on validation set
+preds_rf <- predict(model_rf, data_valid, type = "class")
+
+# Model evaluation
+conf_matrix_rf <- confusionMatrix(preds_rf, as.factor(data_valid$HeartDisease))
+print(conf_matrix_rf)
+```
+
+Support Vector Machine:
+
+```{r}
+# Fit model
+model_svm <- svm(as.factor(HeartDisease) ~., data = data_train)
+
+# Predict on validation set
+pred_svm <- predict(model_svm, data_valid, type = "class")
+
+# Model evaluation
+pred_svm<- predict(model_svm, data_valid, type = "class")
+cm_svm <- confusionMatrix(pred_svm, as.factor(data_valid$HeartDisease))
+print(cm_svm)
+```
+
+K-Nearest Neighbors:
+
+```{r}
+# Determine optimal value of K
+trainControl2 <- trainControl(method="repeatedcv", number=10, repeats=3)
+train_y <- data_train[,names(data_train) %in% c("HeartDisease")]
+test_y <- data_test[,names(data_test) %in% c("HeartDisease")]
+train_x <- data_train[,!names(data_train) %in% c("HeartDisease")]
+test_x <- data_test[,!names(data_test) %in% c("HeartDisease")]
+
+# Fit Model
+fit.knn <- train(as.factor(HeartDisease)~. , data = data_train, method="knn", metric="Accuracy" ,trControl=trainControl2)
+knn.k1 <- fit.knn$bestTune
+
+# Model Evaluation
+prediction <- predict(fit.knn, newdata = test_x)
+cf <- confusionMatrix(prediction, as.factor(test_y))
+
+print(cf)
+```
+
+Logistic Regression:
+
+```{r}
+model_glm <- glm(as.factor(HeartDisease)~., data=data_train, family='binomial')
+summary(model_glm)
+
+pred <- predict(model_glm, newdata = data_test, type = "response")
+predict_class <- ifelse(pred > 0.5, 1, 0)
+table(data_test$HeartDisease, predict_class)
+
+acc_score <- mean(predict_class != data_test$HeartDisease)
+print(paste('Accuracy =', 1 - acc_score))
+```
+
+
+# Hyperparameter Tuning
+
+Decision Tree:
+
+```{r}
+# Hyperparameter tuning
+hp_grid_dt <- expand.grid(
+  maxdepth = c(1, 3, 5, 8, 10, 15),
+  minsplit = c(2, 3, 5, 8, 10, 15),
+  minbucket = c(2, 5, 7),
+  accuracy = NA
+)
+
+for (i in seq_len(nrow(hp_grid_dt))) {
+  fit_dt <- rpart(as.factor(HeartDisease) ~., 
+               data = data_train, 
+               method = "class",
+               maxdepth = hp_grid_dt$maxdepth[i],
+               minsplit = hp_grid_dt$minsplit[i],
+               minbucket = hp_grid_dt$minbucket[i]
+               )
+  pred_dt <- predict(fit_dt, data_valid, type = "class")
+  cm_dt <- confusionMatrix(pred_dt, as.factor(data_valid$HeartDisease))
+  
+  hp_grid_dt$accuracy[i] <- cm_dt$overall['Accuracy']
+}
+
+# Re-fit model with highest accuracy parameters
+best_accuracy_dt <- hp_grid_dt[hp_grid_dt$accuracy == max(hp_grid_dt$accuracy), ]
+best_accuracy_dt <- best_accuracy_dt %>% head(1)
+best_fit_dt <- rpart(as.factor(HeartDisease) ~., 
+               data = data_train, 
+               method = "class",
+               maxdepth = best_accuracy_dt$maxdepth,
+               minsplit = best_accuracy_dt$minsplit,
+               minbucket = best_accuracy_dt$minbucket
+               )
+
+best_pred_dt <- predict(best_fit_dt, data_valid, type="class")
+best_cm_dt <- confusionMatrix(best_pred_dt, as.factor(data_valid$HeartDisease))
+
+print(best_cm_dt)
+```
+
+Decision Tree (with Interaction Terms):
+
+```{r}
+# Fit Model with interaction data
+model_dt2 <- rpart(as.factor(HeartDisease) ~., data = data_train2, method = "class")
+
+# Plot Decision Tree
+rpart.plot(model_dt2)
+
+# Predict on validation set
+preds_dt2 <- predict(model_dt2, data_valid2, type = "class") 
+
+# Model evaluation
+conf_matrix_dt2 <- confusionMatrix(preds_dt2, as.factor(data_valid2$HeartDisease))
+print(conf_matrix_dt2$overall['Accuracy'])
+
+# Hyperparameter tuning
+hp_grid_dt2 <- expand.grid(
+  maxdepth = c(1, 3, 5, 8, 10, 15),
+  minsplit = c(2, 3, 5, 8, 10, 15),
+  minbucket = c(2, 5, 7),
+  accuracy = NA
+)
+
+for (i in seq_len(nrow(hp_grid_dt))) {
+  fit_dt2 <- rpart(as.factor(HeartDisease) ~., 
+               data = data_train2, 
+               method = "class",
+               maxdepth = hp_grid_dt2$maxdepth[i],
+               minsplit = hp_grid_dt2$minsplit[i],
+               minbucket = hp_grid_dt2$minbucket[i]
+               )
+  pred_dt2 <- predict(fit_dt2, data_valid2, type = "class")
+  cm_dt2 <- confusionMatrix(pred_dt2, as.factor(data_valid2$HeartDisease))
+  
+  hp_grid_dt2$accuracy[i] <- cm_dt2$overall['Accuracy']
+}
+
+# Re-fit model with highest accuracy parameters
+best_accuracy_dt2 <- hp_grid_dt2[hp_grid_dt2$accuracy == max(hp_grid_dt2$accuracy), ]
+best_accuracy_dt2 <- best_accuracy_dt2 %>% head(1)
+best_fit_dt2 <- rpart(as.factor(HeartDisease) ~., 
+               data = data_train2, 
+               method = "class",
+               maxdepth = best_accuracy_dt2$maxdepth,
+               minsplit = best_accuracy_dt2$minsplit,
+               minbucket = best_accuracy_dt2$minbucket
+               )
+
+best_pred_dt2 <- predict(best_fit_dt2, data_valid2, type="class")
+best_cm_dt2 <- confusionMatrix(best_pred_dt2, as.factor(data_valid2$HeartDisease))
+
+print(best_cm_dt2)
+```
+
+Random Forest:
+
+```{r}
+# Tune mtry paramater
+train_control <- trainControl(method = "repeatedcv", number = 10, repeats = 3, search='grid')
+tune_grid <- expand.grid(.mtry=c(1:14))
+
+model_rgrid <- train(as.factor(HeartDisease) ~., data=data_train, method="rf", metric='Accuracy', tuneGrid=tune_grid)
+print(model_rgrid)
+
+```
+```{r}
+# Fit with optimal mtry
+model_rf <- randomForest(as.factor(HeartDisease) ~., data = data_train, mtry = 2, ntree = 500, importance = TRUE)
+
+# Predict on validation set
+preds_rf <- predict(model_rf, data_valid, type = "class")
+
+# Model evaluation
+conf_matrix_rf <- confusionMatrix(preds_rf, as.factor(data_valid$HeartDisease))
+print(conf_matrix_rf)
+```
+
+Random Forest (with Interaction Terms):
+
+```{r}
+# Tune mtry paramater
+train_control <- trainControl(method = "repeatedcv", number = 10, repeats = 3, search='grid')
+tune_grid <- expand.grid(.mtry=c(1:14))
+
+model_rgrid <- train(as.factor(HeartDisease) ~., data=data_train2, method="rf", metric='Accuracy', tuneGrid=tune_grid)
+print(model_rgrid)
+
+```
+
+```{r}
+# Fit with optimal mtry
+model_rf2 <- randomForest(as.factor(HeartDisease) ~., data = data_train2, mtry = 2, ntree = 500, importance = TRUE)
+
+# Predict on validation set
+preds_rf2 <- predict(model_rf2, data_valid2, type = "class")
+
+# Model evaluation
+conf_matrix_rf2 <- confusionMatrix(preds_rf2, as.factor(data_valid2$HeartDisease))
+print(conf_matrix_rf2)
+```
+
+Support Vector Machine:
+
+```{r}
+# Support Vector Machine Linear Kernel
+model_svm_linear <- svm(as.factor(HeartDisease) ~., 
+                        data = data_train,
+                        kernel = 'linear')
+
+pred_svm_linear <- predict(model_svm_linear, data_valid, type = "class")
+cm_svm_linear <- confusionMatrix(pred_svm_linear, as.factor(data_valid$HeartDisease))
+print(cm_svm_linear)
+
+# Support Vector Machine Radial Kernel
+model_svm_radial <- svm(as.factor(HeartDisease) ~., 
+                        data = data_train,
+                        kernel = 'radial')
+
+pred_svm_radial <- predict(model_svm_radial, data_valid, type = "class")
+cm_svm_radial <- confusionMatrix(pred_svm_radial, as.factor(data_valid$HeartDisease))
+print(cm_svm_radial)
+```
+
+Support Vector Machine (with Interaction Terms):
+
+```{r}
+# Support Vector Machine Linear Kernel
+model_svm_linear2 <- svm(as.factor(HeartDisease) ~., 
+                        data = data_train2,
+                        kernel = 'linear')
+
+pred_svm_linear2 <- predict(model_svm_linear2, data_valid2, type = "class")
+cm_svm_linear2 <- confusionMatrix(pred_svm_linear2, as.factor(data_valid2$HeartDisease))
+print(cm_svm_linear2)
+
+# Support Vector Machine Radial Kernel
+model_svm_radial2 <- svm(as.factor(HeartDisease) ~., 
+                        data = data_train2,
+                        kernel = 'radial')
+
+pred_svm_radial2 <- predict(model_svm_radial2, data_valid2, type = "class")
+cm_svm_radial2 <- confusionMatrix(pred_svm_radial2, as.factor(data_valid2$HeartDisease))
+print(cm_svm_radial2)
+```
